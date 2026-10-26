@@ -31,12 +31,15 @@ def _figure_block(unit, fig: dict, cache_dir: Path, out_dir: Path) -> list[str]:
     return lines
 
 
+DISCLAIMER = "> ⚠️ AI读图翻译可能存在幻觉，请以原文为准。"
+
+
 def assemble(units, figures_by_id: dict, cache_dir: Path, out_dir: Path,
              zh_name: str = "译文.zh.md", bi_name: str | None = "译文.bilingual.md",
              title_zh: str | None = None) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     zh_lines: list[str] = []
-    bi_lines: list[str] = ["# 双语对照（中 / EN）", ""]
+    bi_lines: list[str] = ["# 双语对照（中 / EN）", DISCLAIMER, ""]
     segments = []
     title_done = False
 
@@ -48,6 +51,8 @@ def assemble(units, figures_by_id: dict, cache_dir: Path, out_dir: Path,
             title_done = True
             text = title_zh if (head == "# " and title_zh) else (u.zh or u.src)
             zh_lines += [head + text, ""]
+            if head == "# ":  # 篇首一级标题下：AI 产物免责行（双语版已在文首）
+                zh_lines += [DISCLAIMER, ""]
             bi_lines += [f"**{u.zh or u.src}** / {u.src}", ""]
             seg.update({"src": u.src, "zh": u.zh or u.src})
         elif u.kind == "text":

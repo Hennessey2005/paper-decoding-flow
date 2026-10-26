@@ -30,6 +30,23 @@ def _find_middle_json(cache_dir: Path) -> Path | None:
     return hits[0] if hits else None
 
 
+def _ollama_unload(base_url: str, model: str) -> None:
+    """local 模式串行保证：S3 跑完立即卸载 VLM，释放显存给 S4 翻译模型。
+
+    6GB 显存放不下 minicpmv26(~5.2GB)+gemma4b(~2.8GB) 双常驻，
+    不显式卸载则 Ollama 在 keep_alive(5min) 内反复换入换出，两边都变慢。
+    """
+    import httpx
+    root = base_url.rsplit("/v1", 1)[0]
+    try:
+        httpx.Client(trust_env=False, timeout=30).post(
+            f"{root}/api/generate",
+            json={"model": model, "keep_alive": 0})
+        print(f"  [local] 已卸载 {model}，显存让位翻译模型", flush=True)
+    except Exception as e:
+        print(f"  [local] 卸载 {model} 失败（不影响产物）: {e}", flush=True)
+
+
 def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
                  cache_dir: Path | None = None, mode: str = "default",
                  log_dir: Path | None = None) -> dict:
@@ -85,13 +102,17 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
         api = {
             "base_url": lp.get("base_url", "http://localhost:11434/v1"),
             "api_key": lp.get("api_key", "ollama"),
-            "vlm_model": None,
+            "vlm_model": lp.get("vlm_model") or None,   # 填 Ollama 多模态模型（如 minicpmv26）解锁本地 S3
             "llm_model": lp.get("llm_model") or "qwen2.5:14b-instruct",
             "proxy": None,
             "max_concurrency": lp.get("max_concurrency", 1),
         }
         # enable_thinking 保持 True（不发送该字段）→ 兼容 Ollama
-        print(f"  [mode] local (Ollama): llm={api['llm_model']}  (S3 图表理解跳过)")
+        if api["vlm_model"]:
+            print(f"  [mode] local (Ollama): vlm={api['vlm_model']} llm={api['llm_model']}"
+                  "  (S3 本地串行，6GB 显存下较慢，属预期)")
+        else:
+            print(f"  [mode] local (Ollama): llm={api['llm_model']}  (未配 vlm_model，S3 图表理解跳过)")
     elif mode == "minimum":
         print("  [mode] minimum (parse only, no API)")
     else:  # default
@@ -142,18 +163,24 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
     mark("s2", formulas=len(registry),
          syntax_ok=sum(1 for f in registry if f.syntax["strict_ok"] or f.syntax["lenient_ok"]))
 
-    # ---------- S3 图表理解（API；offline / local 跳过） ----------
+    # ---------- S3 图表理解（API；offline 跳过；local 配了 vlm_model 则本地 GPU 串行） ----------
     visuals = collect_visuals(mj, cache_dir)
-    if offline or mode == "local":
+    if offline:
         emit_figures(visuals, out_dir / "figures", cache_dir)
-        mark("s3", mode="skip" if mode == "local" else "offline",
-             figures=sum(1 for v in visuals if not v.skipped))
+        mark("s3", mode="offline", figures=sum(1 for v in visuals if not v.skipped))
+    elif mode == "local" and not api["vlm_model"]:
+        emit_figures(visuals, out_dir / "figures", cache_dir)
+        mark("s3", mode="skip", figures=sum(1 for v in visuals if not v.skipped))
     else:
+        local_vlm = (mode == "local")
         vlm = VLMClient(api["base_url"], api["api_key"], api["vlm_model"],
                         proxy=api.get("proxy"), max_retries=vlm_max_retries,
-                        enable_thinking=enable_thinking)
+                        enable_thinking=enable_thinking,
+                        local=local_vlm, timeout=600.0 if local_vlm else 120.0)
         usage = analyze_figures(visuals, cache_dir, vlm, log_path)
         emit_figures(visuals, out_dir / "figures", cache_dir)
+        if local_vlm:
+            _ollama_unload(api["base_url"], api["vlm_model"])
         mark("s3", figures=sum(1 for v in visuals if not v.skipped),
              tokens=f"{usage['in']}+{usage['out']}", fail=usage["fail"])
 

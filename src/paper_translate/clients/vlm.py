@@ -64,19 +64,23 @@ def _data_url(image_path: Path) -> str:
 class VLMClient:
     def __init__(self, base_url: str, api_key: str, model: str,
                  timeout: float = 120.0, max_retries: int = 3,
-                 proxy: str | None = None, enable_thinking: bool = True):
+                 proxy: str | None = None, enable_thinking: bool = True,
+                 local: bool = False):
         self.model = model
         self.max_retries = max_retries
         self.enable_thinking = enable_thinking
+        self.local = local  # Ollama 本地端点：走 options.num_ctx 控上下文，且请求间串行
         self._cli = OpenAI(api_key=api_key, base_url=base_url,
                            http_client=make_http_client(proxy, timeout))
 
     def chat_image(self, image_path: Path, system: str, user: str,
-                   max_tokens: int = 2000) -> dict:
+                   max_tokens: int = 2000, num_ctx: int | None = None) -> dict:
         """发送 单图+文本 请求。返回 {text, usage:{in,out}, duration_s, retries}。
 
         enable_thinking=False 时附加 extra_body={"enable_thinking": False}（关闭长思考，
         加速结构化抽取）；为 True 时不发送该字段，兼容不识别该参数的本地端点（如 Ollama）。
+        local=True 时改用 Ollama 的 extra_body={"options": {...}} 传 num_ctx
+        （实测 6GB 显存：table 需 4096，chart/image 用 2048 更快）。
         """
         content = [
             {"type": "image_url", "image_url": {"url": _data_url(image_path)}},
@@ -84,7 +88,17 @@ class VLMClient:
         ]
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": content}]
-        extra = {"enable_thinking": False} if not self.enable_thinking else None
+        extra: dict = {}
+        if not self.enable_thinking:
+            extra["enable_thinking"] = False
+        if self.local:
+            opts = {"temperature": 0.7}
+            if num_ctx:
+                opts["num_ctx"] = num_ctx
+            extra["options"] = opts
+        kw = {"model": self.model, "messages": messages, "max_tokens": max_tokens}
+        if extra:
+            kw["extra_body"] = extra
         last_err: Exception | None = None
         for attempt in range(self.max_retries):
             t0 = time.perf_counter()

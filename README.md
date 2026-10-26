@@ -97,6 +97,15 @@ python -m paper_translate paper.pdf                          # 未安装命令�
 
 7. 汇报：全部通过后告诉我 local 模式已就绪——在 run.bat 中选 3) local，
    或 python -m paper_translate paper.pdf --mode local。
+
+8. 可选（解锁 local 模式 S3 图表理解，产物升级为全套）：再导入一个本地多模态模型，
+   并把 config/config.yaml 的 local.vlm_model 填为它的名字。以 MiniCPM-V 2.6 为例，
+   官方 GGUF 走 ModelScope（OpenBMB/MiniCPM-V-2_6-gguf），需下载两个文件（缺一不可）：
+   ggml-model-Q4_K_M.gguf（约 4.4GB）与 mmproj-model-f16.gguf（约 1GB，视觉投影）；
+   按第 5 步的 blobs/create API 方式导入，/api/create 的 files 映射里同时列出这两个文件
+   （Ollama 按文件名识别 mmproj 自动挂视觉塔），模型名与 local.vlm_model 一致（如 minicpmv26）。
+   实测 RTX 4050 Laptop 6GB：可跑，~15 tok/s，单图 10-40s，S3 与 S4 串行执行（S3 跑完自动卸载再进翻译）。
+   以上为 6GB 显存的极限操作——可根据自己的显存大小选择更强的模型以提升性能。
 ````
 
 </details>
@@ -110,7 +119,7 @@ python -m paper_translate paper.pdf                          # 未安装命令�
 |---|---|---|---|---|---|
 | `default`（推荐） | 硅基流动云端：Qwen3-VL 图表理解 + DeepSeek 翻译 | ✅ 首次引导填 key 即可用 | `api.api_key`（[硅基流动](https://siliconflow.cn)） | 按量计费，会议 < ¥1/篇，效果最好 | 全套：`译文.zh.md` / `译文.bilingual.md` / `formulas/` / `figures/`（含 VLM 中文描述与数据表）/ `segments.json` |
 | `free` | 智谱免费云端：GLM-4.6V-Flash + GLM-4.7-Flash | ✅ 首次引导填 key 即可用 | `api.zhipu_api_key`（[open.bigmodel.cn](https://open.bigmodel.cn) 注册即得） | 0 元（免费档；偶发限流） | 与 `default` 相同的全套产物 |
-| `local` | Ollama 本地翻译模型（吃本地 GPU，图表理解跳过） | ❌ 手动配置（agent轻松代劳） | 安装 [Ollama](https://ollama.com) + 导入翻译模型（GGUF 推荐 `gemma3-4b-it` Q4_K_M，约 2.8GB 显存） | 0 元（仅电费） | `figures/` 仅含裁剪图与图注（无 VLM 描述），其余同上全套 |
+| `local` | Ollama 本地模型：翻译 + 图表理解（VLM 可选），全离线 | ❌ 手动配置（agent轻松代劳） | 安装 [Ollama](https://ollama.com) + 导入翻译模型（GGUF 推荐 `gemma3-4b-it` Q4_K_M，约 2.8GB 显存）；可选再导入多模态模型（如 MiniCPM-V 2.6 Q4_K_M）启用本地图表理解 | 0 元（仅电费） | 全套：`figures/` 含本地 VLM 中文描述与数据表（配了 vlm_model 时；数值类建议对照原图核验），其余同 `default` |
 | `minimum` | 纯解析（完全不调 API） | ✅ 零配置，开箱即用 | 无 | 0 元 | 解析产物：`译文.zh.md`（保留原文，未翻译）/ `formulas/` / `figures/`（裁剪图）/ `segments.json` |
 
 </details>

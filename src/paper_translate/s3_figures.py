@@ -170,10 +170,13 @@ def analyze(visuals: list[Visual], cache_dir: Path, client: VLMClient,
     print(f"  [s3] {len(todo)} visuals to analyze", flush=True)
     for i, v in enumerate(todo, 1):
         print(f"  [s3 {i}/{len(todo)}] {v.id} ({v.kind}) ...", end="", flush=True)
+        # 本地 Ollama（6GB 实测）：table 长输出需 4096 上下文，chart/image 用 2048 更快
+        num_ctx = 4096 if v.kind == "table" else 2048
         resp = client.chat_image(
             cache_dir / v.image_path, SYSTEM_PROMPT,
             _prompt_for(v.kind, v.caption, v.context_before + " " + v.context_after),
             max_tokens=4096 if v.kind == "table" else 2000,
+            num_ctx=num_ctx if client.local else None,
         )
         total["in"] += resp["usage"]["in"]
         total["out"] += resp["usage"]["out"]

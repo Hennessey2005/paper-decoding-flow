@@ -120,7 +120,7 @@ echo.
 echo Select mode:
 echo   1^) default  ^(recommended^)  - SiliconFlow cloud (paid)
 echo   2^) free                    - Zhipu GLM cloud (free tier)
-echo   3^) local                   - Ollama on your GPU (S3 skipped, no cloud)
+echo   3^) local                   - Ollama on your GPU (S3 via local VLM if configured, no cloud)
 echo   4^) minimum                 - parse only (no API at all)
 set /p "MODE=Input 1-4 (Enter=1): "
 if /i "%MODE%"=="2" set "MODEFLAG=--mode free"

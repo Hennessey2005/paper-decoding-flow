@@ -33,13 +33,16 @@ free:
 
 # ---- 本地方案（Ollama，本地 GPU，选填）----
 # 启用：run.bat 菜单选 3) local，或 CLI 加 --mode local。
-# 前提：本机已装 Ollama 并 pull 翻译模型（如 `ollama pull qwen2.5:14b-instruct`）。
-# Ollama 暴露 OpenAI 兼容端点，自动用本地 GPU；local 模式下 S3 图表理解跳过。
+# 前提：本机已装 Ollama 并导入翻译模型（如 gemma3-4b-it Q4_K_M GGUF）。
+# 可选：vlm_model 填 Ollama 多模态模型（实测 MiniCPM-V 2.6 q4_K_M，GGUF 主模型+mmproj
+#       从 ModelScope OpenBMB/MiniCPM-V-2_6-gguf 下载导入），解锁本地 S3 图表理解。
+#       6GB 显存下 VLM 与翻译模型不能常驻，流水线串行执行（S3 跑完自动卸载再进 S4）。
+# 未配置 vlm_model 时 local 模式跳过 S3（figures/ 仅含裁剪图与图注）。
 local:
   base_url: http://localhost:11434/v1     # Ollama OpenAI 兼容端点
   api_key: "ollama"                        # 占位，Ollama 不校验
   llm_model: "gemma4b"                     # 本地翻译模型（需先导入 Ollama；RTX4050 6GB 实测三选一：gemma4b 质量/ qwen3b 均衡/ qwen15b 最快）
-  vlm_model: ""                            # 预留：填 Ollama 多模态模型可扩展 S3 本地化（当前 local 跳过 S3）
+  vlm_model: ""                            # 本地图表理解模型（如 minicpmv26；留空=跳过 S3）
   max_concurrency: 1                       # 本地显存有限，建议降并发
 
 # ---- 输出 ----
