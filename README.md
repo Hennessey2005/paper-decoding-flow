@@ -11,8 +11,8 @@
 
 | 痛点 | 方案 | 产出 |
 |---|---|---|
-| 公式变乱码 / 被翻译毁掉 | 公式剥离为 LaTeX + 占位符保护 + 语法回验 | `formulas/` |
-| 图表只是图片，无法检索 | 多模态模型生成中文描述 + 数据表 | `figures/` |
+| 公式变乱码 / 被翻译毁掉 | 公式剥离为 LaTeX + 占位符保护 + 语法回验 | 可渲染高可懂的公式 |
+| 图表只是图片，无法检索 | 多模态模型生成中文描述 + 数据表 | 图片语义解释 |
 | 译文无法进知识库 | 语义块翻译 + 页码/坐标溯源层 | `译文.zh.md` + `segments.json` |
 | 配环境劝退 | Windows `run.bat` 自举：自动装 Python/依赖/引导填 key，拖拽即用 | 首次双击后免维护 |
 
@@ -55,6 +55,8 @@ python -m paper_translate paper.pdf                          # 未安装命令�
 ```
 
 默认适配硅基流动（OpenAI 兼容协议），模板已预填实测模型：图表理解 `Qwen/Qwen3-VL-32B-Instruct`、翻译 `deepseek-ai/DeepSeek-V4.1-Flash`，换平台只需改 `base_url`、`api_key` 和模型名（注意 VLM 需支持 `enable_thinking` 参数的密集系列多模态模型，见模板注释）。
+
+更新：直接 `git pull` 即可。
 
 <details>
 <summary><b>配置 local 模式：需要本地 GPU 并安装 Ollama——克隆仓库后，在仓库所在目录打开你的 agent，将以下内容发送给它，一次性完成配置</b></summary>
