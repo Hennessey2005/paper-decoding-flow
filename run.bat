@@ -114,7 +114,7 @@ set "no_proxy=localhost,127.0.0.1"
 set "OKCNT=0"
 set "FAILCNT=0"
 
-rem ---------- mode selection (four peer modes) ----------
+rem ---------- mode selection (five peer modes) ----------
 set "MODEFLAG="
 echo.
 echo Select mode:
@@ -122,11 +122,14 @@ echo   1^) default  ^(recommended^)  - SiliconFlow cloud (paid)
 echo   2^) free                    - Zhipu GLM cloud (free tier)
 echo   3^) local                   - Ollama on your GPU (S3 via local VLM if configured, no cloud)
 echo   4^) minimum                 - parse only (no API at all)
-set /p "MODE=Input 1-4 (Enter=1): "
+echo   5^) turbo      ^(EXPERIMENTAL^) - SiliconFlow cloud, concurrent S3+S4 overlap (faster)
+set /p "MODE=Input 1-5 (Enter=1): "
 if /i "%MODE%"=="2" set "MODEFLAG=--mode free"
 if /i "%MODE%"=="2" echo [mode] free runs on a shared free tier - expect throttling waits at peak times; progress is cached and resumable.
 if /i "%MODE%"=="3" set "MODEFLAG=--mode local"
 if /i "%MODE%"=="4" set "MODEFLAG=--mode minimum"
+if /i "%MODE%"=="5" set "MODEFLAG=--mode turbo"
+if /i "%MODE%"=="5" echo [mode] turbo is experimental: same cloud/models as default, S3 and S4 run concurrently with a shared rate limiter. If it misbehaves, switch back to 1^) default - caches are shared, no double billing.
 
 rem ---------- mode guards (top-level, no for /f backtick: cmd splits quoted ----------
 rem ---------- commands inside backticks - use a temp file handshake instead)  ----------
@@ -215,7 +218,7 @@ exit /b %FAILCNT%
 echo.
 echo ======== Processing: %~1 ========
 echo    First parse of a paper downloads MinerU models once and takes ~10 min.
-echo    Keep this window open. CLI also supports --mode default/free/local/minimum.
+echo    Keep this window open. CLI also supports --mode default/turbo/free/local/minimum.
 "%VPY%" -m paper_translate %MODEFLAG% --open %1
 if not errorlevel 1 goto :run_ok
 rem no paren-block here: file names may contain ")" and break block parsing

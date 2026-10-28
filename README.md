@@ -48,7 +48,7 @@ paper-translate paper.pdf
 常用参数：
 
 ```bash
-paper-translate paper.pdf --mode default|free|local|minimum  # 四种平级模式，见下表
+paper-translate paper.pdf --mode default|turbo|free|local|minimum  # 运行模式，见下表
 paper-translate paper.pdf --cache-dir output/_cache/<hash>   # 复用解析缓存
 paper-translate paper.pdf --open                             # 完成后打开输出目录
 python -m paper_translate paper.pdf                          # 未安装命令时
@@ -114,19 +114,22 @@ python -m paper_translate paper.pdf                          # 未安装命令�
 
 </details>
 
-## 四种运行模式
+## 运行模式
 
 <details>
-<summary><b>点击展开：default / free / local / minimum 模式对比（自动配置、配置需求、成本、产物）</b></summary>
+<summary><b>点击展开：default / turbo / free / local / minimum 模式对比（自动配置、配置需求、成本、产物）</b></summary>
 
 | 模式 | 名称 | 是否自动配置 | 配置需求 | 成本 | 产物 |
 |---|---|---|---|---|---|
-| `default`（推荐） | 硅基流动云端：Qwen3-VL 图表理解 + DeepSeek 翻译 | ✅ 首次引导填 key 即可用 | `api.api_key`（[硅基流动](https://siliconflow.cn)） | 按量计费，会议 < ¥1/篇，效果最好 | 全套：`译文.zh.md` / `译文.bilingual.md` / `formulas/` / `figures/`（含 VLM 中文描述与数据表）/ `segments.json` |
+| `default`（推荐） | 硅基流动云端：Qwen3-VL 图表理解 + DeepSeek 翻译（串行） | ✅ 首次引导填 key 即可用 | `api.api_key`（[硅基流动](https://siliconflow.cn)） | 按量计费，会议 < ¥1/篇，效果最好 | 全套：`译文.zh.md` / `译文.bilingual.md` / `formulas/` / `figures/`（含 VLM 中文描述与数据表）/ `segments.json` |
+| `turbo`（实验） | 同上云端，**并发版**：S3(并发6)∥S4(并发8) 重叠执行，共享 180RPM/1.8M TPM 滑动窗口限流（限额 200/2M 留余量） | ✅ 同 `default` | 同 `default`；`api.rate_limit` 可覆盖软限 | 同 `default`（速度约 ×3-4，长尾大表不再阻塞队列） | 同 `default`；单项失败不中断整体，重跑自动补译 |
 | `free` | 智谱免费云端：GLM-4.6V-Flash + GLM-4.7-Flash | ✅ 首次引导填 key 即可用 | `api.zhipu_api_key`（[open.bigmodel.cn](https://open.bigmodel.cn) 注册即得） | 0 元（免费档；偶发限流） | 与 `default` 相同的全套产物 |
 | `local` | Ollama 本地模型：翻译 + 图表理解（可选），全离线 | ❌ 手动配置（agent轻松代劳） | 安装 [Ollama](https://ollama.com) + 导入翻译模型（推荐 `gemma3-4b-it` Q4_K_M）；可选导入多模态模型解锁图表理解 | 0 元（仅电费） | 全套（同 `default`；本地 VLM 描述数值类建议对照原图核验） |
 | `minimum` | 纯解析（完全不调 API） | ✅ 零配置，开箱即用 | 无 | 0 元 | 解析产物：`译文.zh.md`（保留原文，未翻译）/ `formulas/` / `figures/`（裁剪图）/ `segments.json` |
 
 </details>
+
+> **turbo 说明**：并发参数来自 `scripts/concurrency_bench.py` 实测（2026-10-28，硅基流动：S4 并发 8 提速 ~6×、S3 并发 6 消化 200s+ 级大表长尾，全档 0 次 429）。实测 **10 页论文 API 阶段 90–180 秒**（串行同规模约 2–5 分钟）；长尾大表在后台解析时翻译队列照常推进，互不等待。与 `default` 共享同一套缓存（translations.json / 图表结果），先用哪个模式跑都不重复计费；如遇异常切回 `default` 即从断点续跑。单项失败不中断整体，重跑自动补译。
 
 所有模式共享 S1 本地解析（MinerU，按 PDF 内容哈希缓存，重跑零成本）。
 
@@ -158,7 +161,7 @@ output/<论文标题>/
 
 ## 实测指标（Attention Is All You Need · arXiv 1706.03762v7 · 15 页双栏 · 纯 CPU）
 
-冷启动全流程约 **13 分钟 / < ¥1**：S1 解析 223.5s（本地免费）+ S2–S5 约 530s；图表理解 9 项（5 表 + 4 图）约 12.7k tokens，翻译 103 单元约 40.7k tokens，API 合计约 53k tokens；显示公式语法回验 5/5，端到端自检 4/4 PASS；解析/翻译缓存命中后重跑 0 次 API 调用（约 7 min 纯本地重算）。
+冷启动全流程约 **13 分钟 / < ¥1**：S1 解析 223.5s（本地免费）+ S2–S5 约 530s；图表理解 9 项（5 表 + 4 图）约 12.7k tokens，翻译 103 单元约 40.7k tokens，API 合计约 53k tokens；显示公式语法回验 5/5，端到端自检 4/4 PASS；解析/翻译缓存命中后重跑 0 次 API 调用（约 7 min 纯本地重算）。同篇用 `turbo` 模式（缓存复用后仅重算 S2–S5）：API 阶段约 **5.5 分钟**（含单项 332s 的大表，全程与翻译重叠、0 次 429）；常规 10 页论文实测 90–180s。
 
 ## 项目结构
 

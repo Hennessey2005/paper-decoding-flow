@@ -4,6 +4,12 @@
 断点复用：
     - cache_dir 下已有 middle_json.json → 跳过 S1（最贵的本地解析）
     - cache_dir 下已有 translations.json → S4 全部走缓存（0 API 调用）
+
+turbo 模式（并发调度，参数来自 scripts/concurrency_bench.py 实测）：
+    S3（并发 6）提交后台线程后立即进入 S4（并发 8），两阶段重叠执行、
+    共享一个滑动窗口限流器（RPM+TPM），总请求严格压在供应商限额内
+    （硅基流动 200RPM/2M TPM → 软限 180/1.8M）。
+    default 模式行为完全不变（串行），turbo 稳定前互不影响。
 """
 from __future__ import annotations
 
@@ -13,6 +19,7 @@ import time
 from pathlib import Path
 
 from .clients.llm import LLMClient, log_event
+from .clients.ratelimit import SlidingWindowLimiter
 from .clients.vlm import VLMClient
 from .config import load_config
 from .s2_formulas import extract_formulas, emit as emit_formulas
@@ -52,8 +59,9 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
                  log_dir: Path | None = None) -> dict:
     """out_dir=None → S1 解析后按论文标题自动命名 output/<标题>（v2.1 P0-A，title_naming）。
 
-    mode（平级四选一，run.bat 菜单 / --mode 指定）：
-      default  - 云端硅基流动（原默认）
+    mode（平级模式，run.bat 菜单 / --mode 指定）：
+      default  - 云端硅基流动（原默认，S3/S4 串行）
+      turbo    - 云端硅基流动并发版：S3(6)∥S4(8) 重叠 + 全局 RPM/TPM 限流
       free     - 智谱 GLM-4.6V/4.7-Flash（免费云）
       local    - 本地 Ollama 翻译模型（本地 GPU），S3 图表理解跳过
       minimum  - 纯解析，不调任何 API
@@ -80,6 +88,11 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
     api = cfg.get("api", {})
     enable_thinking = True   # 本地/Ollama 端点不识别 enable_thinking，默认省略该参数
     vlm_max_retries, llm_max_retries = 3, 3
+    # turbo 并发参数（2026-10-28 基准实测：conc=8/6 零 429；16 会顶 RPM 限故配限流器兜底）
+    turbo = (mode == "turbo")
+    s3_conc = 6 if turbo else 1
+    s4_conc = 8 if turbo else 1
+    limiter: SlidingWindowLimiter | None = None
 
     if mode == "free":
         fp = cfg.get("free", {})
@@ -115,10 +128,18 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
             print(f"  [mode] local (Ollama): llm={api['llm_model']}  (未配 vlm_model，S3 图表理解跳过)")
     elif mode == "minimum":
         print("  [mode] minimum (parse only, no API)")
-    else:  # default
-        mode = "default"
+    else:  # default / turbo（同一云端配置，仅调度方式不同）
         enable_thinking = False
-        print(f"  [mode] default ({api.get('provider', 'cloud')}): "
+        if turbo:
+            rl = api.get("rate_limit") or {}
+            rpm = int(rl.get("rpm", 180))
+            tpm = int(rl.get("tpm", 1_800_000))
+            limiter = SlidingWindowLimiter(rpm=rpm, tpm=tpm)
+            print(f"  [mode] turbo (SiliconFlow concurrent): S3∥{s3_conc} S4∥{s4_conc} "
+                  f"overlap, rate limit {rpm}RPM/{tpm:,}TPM (soft) <- provider 200/2,000,000")
+        else:
+            mode = "default"
+        print(f"  [mode] {mode} ({api.get('provider', 'cloud')}): "
               f"vlm={api.get('vlm_model')} llm={api.get('llm_model')}")
 
     report: dict = {"pdf": pdf.name, "pdf_hash": pdf_hash,
@@ -165,6 +186,23 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
 
     # ---------- S3 图表理解（API；offline 跳过；local 配了 vlm_model 则本地 GPU 串行） ----------
     visuals = collect_visuals(mj, cache_dir)
+
+    def _figs_snapshot(with_results: bool) -> list[dict]:
+        """with_results=False：仅对齐字段（turbo 重叠期给 build_units 用）；
+        True：S3 完成后的全量结果（给 S5 组装用）。"""
+        out = []
+        for v in visuals:
+            d = dict(id=v.id, kind=v.kind, page_idx=v.page_idx, fig_no=v.fig_no,
+                     bbox=v.bbox, image_path=v.image_path, skipped=v.skipped)
+            if with_results:
+                d.update(caption=v.caption, caption_zh=v.caption_zh,
+                         description=v.description, data_table=v.data_table,
+                         confidence=v.confidence)
+            out.append(d)
+        return out
+
+    s3_thread = None
+    s3_box: dict = {}          # 后台线程产物 {usage, error?}
     if offline:
         emit_figures(visuals, out_dir / "figures", cache_dir)
         mark("s3", mode="offline", figures=sum(1 for v in visuals if not v.skipped))
@@ -177,20 +215,30 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
                         proxy=api.get("proxy"), max_retries=vlm_max_retries,
                         enable_thinking=enable_thinking,
                         local=local_vlm, timeout=600.0 if local_vlm else 120.0)
-        usage = analyze_figures(visuals, cache_dir, vlm, log_path)
-        emit_figures(visuals, out_dir / "figures", cache_dir)
-        if local_vlm:
-            _ollama_unload(api["base_url"], api["vlm_model"])
-        mark("s3", figures=sum(1 for v in visuals if not v.skipped),
-             tokens=f"{usage['in']}+{usage['out']}", fail=usage["fail"])
+        if turbo:
+            # S3 提交后台：analyze 原地写 Visual 对象，内部单项失败已隔离；
+            # 线程级异常兜底捕获进 s3_box，join 后统一报告（不让 S4 成果陪葬）
+            import threading
 
-    figures_dicts = [dict(id=v.id, kind=v.kind, page_idx=v.page_idx, fig_no=v.fig_no,
-                          bbox=v.bbox, image_path=v.image_path, caption=v.caption,
-                          caption_zh=v.caption_zh, description=v.description,
-                          data_table=v.data_table, confidence=v.confidence,
-                          skipped=v.skipped) for v in visuals]
+            def _s3_bg():
+                try:
+                    s3_box["usage"] = analyze_figures(visuals, cache_dir, vlm, log_path,
+                                                      concurrency=s3_conc, limiter=limiter)
+                except Exception as e:  # noqa: BLE001
+                    s3_box["error"] = str(e)[:300]
+            s3_thread = threading.Thread(target=_s3_bg, name="s3-turbo", daemon=True)
+            s3_thread.start()
+        else:
+            usage = analyze_figures(visuals, cache_dir, vlm, log_path)
+            emit_figures(visuals, out_dir / "figures", cache_dir)
+            if local_vlm:
+                _ollama_unload(api["base_url"], api["vlm_model"])
+            mark("s3", figures=sum(1 for v in visuals if not v.skipped),
+                 tokens=f"{usage['in']}+{usage['out']}", fail=usage["fail"])
 
-    # ---------- S4 翻译（API；offline 跳过） ----------
+    figures_dicts = _figs_snapshot(with_results=(s3_thread is None))
+
+    # ---------- S4 翻译（API；offline 跳过；turbo 并发+与 S3 重叠+共享限流） ----------
     units = build_units(mj, figures_dicts)
     title_src = next((u.src for u in units if u.kind == "title"), pdf.stem)
     if offline:
@@ -204,9 +252,29 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
                                 gloss_path=Path("config/glossary.yaml"),
                                 doc_title=title_src,
                                 cache_path=cache_dir / "translations.json",
-                                log_path=log_path)
+                                log_path=log_path,
+                                concurrency=s4_conc, limiter=limiter)
+
+        # ---- turbo：等 S3 后台收敛，再产出 figures 并重建全量快照供 S5 ----
+        if s3_thread is not None:
+            if limiter is not None:
+                print(f"  [s4] 限流实测: {limiter.stats(limiter.created)}", flush=True)
+            s3_thread.join()
+            if "error" in s3_box:
+                print(f"  [s3] ⚠️ 后台异常（不影响译文，figures 按已完成部分产出）: "
+                      f"{s3_box['error'][:120]}", flush=True)
+            u3 = s3_box.get("usage", {"in": 0, "out": 0, "fail":
+                                      sum(1 for v in visuals if v.error)})
+            mark("s3", figures=sum(1 for v in visuals if not v.skipped),
+                 tokens=f"{u3['in']}+{u3['out']}", fail=u3["fail"])
+            figures_dicts = _figs_snapshot(with_results=True)
         mark("s4", calls=usage["calls"], cache_hit=usage["cache_hit"],
-             tokens=f"{usage['in']}+{usage['out']}", flags=usage["flags"])
+             tokens=f"{usage['in']}+{usage['out']}", flags=usage["flags"],
+             fails=usage.get("fails", 0))
+
+    if s3_thread is not None:
+        # figures 产物统一在主线程 emit（S3 后台线程只写内存对象，避免并发写盘）
+        emit_figures(visuals, out_dir / "figures", cache_dir)
 
     # ---------- S5 组装 ----------
     fig_by_id = {f["id"]: f for f in figures_dicts}

@@ -29,8 +29,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cache-dir", default=None, help="解析缓存目录（复用可跳过 S1）")
     p.add_argument("--tier", default=None, help="MinerU 档位 basic|standard|flash（默认读配置）")
     p.add_argument("--mode", default="default",
-                   choices=["default", "free", "local", "minimum"],
-                   help="运行模式：default(硅基云) | free(智谱免费云) | local(Ollama本地翻译) | minimum(纯解析)")
+                   choices=["default", "turbo", "free", "local", "minimum"],
+                   help="运行模式：default(硅基云·串行) | turbo(硅基云·并发重叠，实验) | "
+                        "free(智谱免费云) | local(Ollama本地翻译) | minimum(纯解析)")
     p.add_argument("--free", dest="free", action="store_true",
                    help="[兼容别名] 等价于 --mode free")
     p.add_argument("--offline", dest="offline", action="store_true",

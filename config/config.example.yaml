@@ -22,6 +22,12 @@ api:
   proxy: ""
   max_concurrency: 4
   budget_limit_usd: 1.0    # 单篇成本上限，超过暂停
+  # ---- turbo 模式并发护栏（仅 --mode turbo 生效；实测 2026-10-28）----
+  # 硅基流动限额 200 RPM / 2,000,000 TPM；软限留 10% 余量防抖动。
+  # S3 并发 6 / S4 并发 8 固定于代码（基准：conc=8/12 零 429）。换平台改这里即可。
+  rate_limit:
+    rpm: 180               # 每分钟请求数上限（两阶段重叠共享）
+    tpm: 1800000           # 每分钟 token 上限（预留-校准制）
 
 # ---- 免费方案（智谱，全免费，选填）----
 # 在 api.zhipu_api_key 填入智谱 key 后，run.bat 启动时可选 free 模式启用：

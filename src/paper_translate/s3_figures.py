@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -163,48 +164,109 @@ def collect_visuals(middle_json: dict, cache_dir: Path,
 
 
 def analyze(visuals: list[Visual], cache_dir: Path, client: VLMClient,
-            log_path: Path) -> dict:
-    """顺序调用 VLM 解析每个未跳过的视觉块。返回用量汇总。"""
+            log_path: Path, concurrency: int = 1, limiter=None) -> dict:
+    """解析每个未跳过的视觉块。返回用量汇总。
+
+    concurrency>1（turbo）：线程池并发（默认 6）。长尾项（大表可达 200s+）不再
+    阻塞其余图表；单项失败只标记 v.error 不中断整体（emit 时显示失败行，
+    重跑续分析）。limiter 为 S3/S4 共享的 SlidingWindowLimiter：请求前按
+    估算预留 token（图片视觉 token ~1.5k + 文本 + max_tokens），返回后校准。
+    内存：并发 6 时每线程各自持有 base64（单图数百 KB~2MB），峰值 ~10MB/线程级，
+    响应 text（≤4k 字符）用完即随作用域释放，无跨请求累积。
+    """
     total = {"in": 0, "out": 0, "calls": 0, "fail": 0}
     todo = [v for v in visuals if not v.skipped]
-    print(f"  [s3] {len(todo)} visuals to analyze", flush=True)
-    for i, v in enumerate(todo, 1):
-        print(f"  [s3 {i}/{len(todo)}] {v.id} ({v.kind}) ...", end="", flush=True)
-        # 本地 Ollama（6GB 实测）：table 长输出需 4096 上下文，chart/image 用 2048 更快
-        num_ctx = 4096 if v.kind == "table" else 2048
-        resp = client.chat_image(
-            cache_dir / v.image_path, SYSTEM_PROMPT,
-            _prompt_for(v.kind, v.caption, v.context_before + " " + v.context_after),
-            max_tokens=4096 if v.kind == "table" else 2000,
-            num_ctx=num_ctx if client.local else None,
-        )
-        total["in"] += resp["usage"]["in"]
-        total["out"] += resp["usage"]["out"]
-        total["calls"] += 1
-        v.usage = resp["usage"]
+    print(f"  [s3] {len(todo)} visuals to analyze"
+          + (f" (concurrency={concurrency})" if concurrency > 1 else ""), flush=True)
+
+    lock = threading.Lock()
+    n_done = 0
+    n_total = len(todo)
+
+    def _num_ctx(v: Visual) -> int | None:
+        return 4096 if v.kind == "table" else 2048
+
+    def _max_tokens(v: Visual) -> int:
+        return 4096 if v.kind == "table" else 2000
+
+    def _call(v: Visual) -> dict:
+        entry = None
+        if limiter is not None:
+            # 预留：图 ~1.6k 视觉 token + prompt 文本估算 + max_tokens
+            est = 1600 + len(v.caption) + len(v.context_before) + len(v.context_after) \
+                + _max_tokens(v) + 200
+            entry = limiter.acquire(est)
         try:
-            obj = parse_model_json(resp["text"])
-            # VLM 倾向用 LaTeX 定界符 \( \) / \[ \]，KaTeX（mdview）只认 $ / $$，统一转写
-            def _md(s: str) -> str:
-                return tidy_inline_math(to_markdown_math(s))
-            v.figure_type = str(obj.get("figure_type", ""))[:24]
-            v.caption_zh = _md(str(obj.get("caption_zh", ""))[:300])
-            v.description = _md(str(obj.get("description", ""))[:1200])
-            dt = obj.get("data_table")
-            v.data_table = _md(str(dt)[:4000]) if dt not in (None, "null", "", "None") else None
-            v.confidence = max(0.0, min(1.0, float(obj.get("confidence", 0.5))))
+            resp = client.chat_image(
+                cache_dir / v.image_path, SYSTEM_PROMPT,
+                _prompt_for(v.kind, v.caption, v.context_before + " " + v.context_after),
+                max_tokens=_max_tokens(v),
+                num_ctx=_num_ctx(v) if client.local else None)
+        except Exception:
+            if limiter is not None:
+                limiter.correct(entry, 0)
+            raise
+        if limiter is not None:
+            limiter.correct(entry, resp["usage"]["in"] + resp["usage"]["out"])
+        return resp
+
+    def _consume(v: Visual, resp: dict) -> None:
+        """解析单响应写入 Visual（串行/并发共用，失败语义一致）。"""
+        nonlocal n_done
+        with lock:
+            total["in"] += resp["usage"]["in"]
+            total["out"] += resp["usage"]["out"]
+            total["calls"] += 1
+            v.usage = resp["usage"]
+            try:
+                obj = parse_model_json(resp["text"])
+
+                # VLM 倾向用 LaTeX 定界符 \( \) / \[ \]，KaTeX（mdview）只认 $ / $$，统一转写
+                def _md(s: str) -> str:
+                    return tidy_inline_math(to_markdown_math(s))
+                v.figure_type = str(obj.get("figure_type", ""))[:24]
+                v.caption_zh = _md(str(obj.get("caption_zh", ""))[:300])
+                v.description = _md(str(obj.get("description", ""))[:1200])
+                dt = obj.get("data_table")
+                v.data_table = _md(str(dt)[:4000]) if dt not in (None, "null", "", "None") else None
+                v.confidence = max(0.0, min(1.0, float(obj.get("confidence", 0.5))))
+            except Exception as e:
+                v.error = f"JSON解析失败: {e}"
+            n_done += 1
+            done_n = n_done
+            log_event(log_path, {
+                "stage": "s3", "level": "info" if not v.error else "warn",
+                "item": v.id, "engine": client.model,
+                "duration_ms": int(resp["duration_s"] * 1000),
+                "tokens_in": resp["usage"]["in"], "tokens_out": resp["usage"]["out"],
+                "error": v.error or None})
+        print(f"  [s3 {done_n}/{n_total}] {v.id} ({v.kind}) {resp['duration_s']}s"
+              + (f" FAIL {v.error[:60]}" if v.error else ""), flush=True)
+
+    def _one(v: Visual) -> None:
+        nonlocal n_done
+        try:
+            _consume(v, _call(v))
         except Exception as e:
-            v.error = f"JSON解析失败: {e}"
-            total["fail"] += 1
-        print(f" {resp['duration_s']}s" + (f" FAIL {v.error[:60]}" if v.error else ""),
-              flush=True)
-        log_event(log_path, {
-            "stage": "s3", "level": "info" if not v.error else "warn",
-            "item": v.id, "engine": client.model,
-            "duration_ms": int(resp["duration_s"] * 1000),
-            "tokens_in": resp["usage"]["in"], "tokens_out": resp["usage"]["out"],
-            "error": v.error or None,
-        })
+            if concurrency <= 1:
+                raise  # 串行（default/local/free）保持旧语义：重试耗尽即抛穿
+            # 并发（turbo）单项彻底失败：标记后继续（重跑时该项自动重新分析，其余不受影响）
+            # fail 计数统一由末尾按 v.error 汇总，此处不重复 +1
+            with lock:
+                v.error = str(e)[:200]
+                n_done += 1
+                done_n = n_done
+                log_event(log_path, {"stage": "s3", "level": "error",
+                                     "item": v.id, "error": v.error})
+            print(f"  [s3 {done_n}/{n_total}] {v.id} FAIL {v.error[:90]}", flush=True)
+
+    if concurrency > 1 and n_total > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(concurrency, n_total)) as ex:
+            list(ex.map(_one, todo))
+    else:
+        for v in todo:
+            _one(v)
     total["fail"] = total["fail"] + sum(1 for v in visuals if v.error)
     return total
 
