@@ -130,6 +130,21 @@ if /i "%MODE%"=="3" set "MODEFLAG=--mode local"
 if /i "%MODE%"=="4" set "MODEFLAG=--mode minimum"
 if /i "%MODE%"=="5" set "MODEFLAG=--mode turbo"
 if /i "%MODE%"=="5" echo [mode] turbo is experimental: same cloud/models as default, S3 and S4 run concurrently with a shared rate limiter. If it misbehaves, switch back to 1^) default - caches are shared, no double billing.
+if /i "%MODE%"=="5" goto :turbo_summary
+goto :modes_done2
+
+:turbo_summary
+rem --- turbo only: ask about optional overview (S6). Explicit flag either way, ---
+rem --- so this prompt is the single source of truth (config default not consulted). ---
+set "SUMFLAG=--no-summary"
+set /p "SUM=Also generate quick-read overview file (gai-lan.md)? 1=yes / 0=no (Enter=0): "
+if "%SUM%"=="1" set "SUMFLAG=--summary"
+if /i "%SUM%"=="y" set "SUMFLAG=--summary"
+if /i "%SUM%"=="yes" set "SUMFLAG=--summary"
+set "MODEFLAG=--mode turbo %SUMFLAG%"
+echo [mode] turbo overview: %SUMFLAG:2=%
+
+:modes_done2
 
 rem ---------- mode guards (top-level, no for /f backtick: cmd splits quoted ----------
 rem ---------- commands inside backticks - use a temp file handshake instead)  ----------

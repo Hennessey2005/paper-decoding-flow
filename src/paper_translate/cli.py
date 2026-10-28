@@ -36,6 +36,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="[兼容别名] 等价于 --mode free")
     p.add_argument("--offline", dest="offline", action="store_true",
                    help="[兼容别名] 等价于 --mode minimum")
+    p.add_argument("--summary", dest="summary", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="turbo 模式下生成「概览.md」全文总览；--summary/--no-summary "
+                        "覆盖 config.summary.enabled（默认跟随配置文件；仅 turbo 模式生效）")
     p.add_argument("--config", default=None, help="配置文件路径（默认 config/config.yaml）")
     p.add_argument("--open", dest="open_out", action="store_true",
                    help="完成后用系统文件管理器打开输出目录（run.bat 使用）")
@@ -63,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = run_pipeline(pdf, out_dir, cfg,
                               cache_dir=Path(args.cache_dir) if args.cache_dir else None,
-                              mode=mode)
+                              mode=mode, summary=args.summary)
     except KeyboardInterrupt:
         # Ctrl+C：已完成的 S3 项 / S4 单元均已落盘缓存，重跑自动从断点继续
         print("\n[interrupted] 已手动中止。已完成的单元有缓存，重新运行将从断点继续。")

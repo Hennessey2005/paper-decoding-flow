@@ -26,6 +26,7 @@ from .s2_formulas import extract_formulas, emit as emit_formulas
 from .s3_figures import analyze as analyze_figures, collect_visuals, emit_figures
 from .s4_translate import build_units, translate_units
 from .s5_assemble import assemble
+from .s6_summary import run_summary
 from .title_naming import extract_doc_title, resolve_out_dir, write_hash_marker
 
 
@@ -56,7 +57,8 @@ def _ollama_unload(base_url: str, model: str) -> None:
 
 def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
                  cache_dir: Path | None = None, mode: str = "default",
-                 log_dir: Path | None = None) -> dict:
+                 log_dir: Path | None = None,
+                 summary: bool | None = None) -> dict:
     """out_dir=None → S1 解析后按论文标题自动命名 output/<标题>（v2.1 P0-A，title_naming）。
 
     mode（平级模式，run.bat 菜单 / --mode 指定）：
@@ -93,6 +95,10 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
     s3_conc = 6 if turbo else 1
     s4_conc = 8 if turbo else 1
     limiter: SlidingWindowLimiter | None = None
+    # S6 概览开关：CLI --summary/--no-summary 优先，否则 config.summary.enabled
+    scfg = cfg.get("summary") or {}
+    summary_on = bool(summary) if summary is not None else bool(scfg.get("enabled", False))
+    summary_on = summary_on and turbo   # 仅 turbo 模式生效（串行模式不带入）
 
     if mode == "free":
         fp = cfg.get("free", {})
@@ -241,6 +247,30 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
     # ---------- S4 翻译（API；offline 跳过；turbo 并发+与 S3 重叠+共享限流） ----------
     units = build_units(mj, figures_dicts)
     title_src = next((u.src for u in units if u.kind == "title"), pdf.stem)
+
+    # ---------- S6 概览（turbo 可选；仅依赖原文 units/图注清单/公式注册表，
+    #     不依赖 VLM/翻译结果 → 此处起线程，与 S3/S4 全程重叠，S5 前 join） ----------
+    s6_thread = None
+    s6_box: dict = {}
+    if turbo and summary_on:
+        # 128k 直读 prefill + 3k 解码远超常规 120s，S6 客户端单独放宽超时
+        llm_for_s6 = LLMClient(api["base_url"], api["api_key"],
+                               api.get("llm_model") or api["vlm_model"],
+                               timeout=600.0,
+                               proxy=api.get("proxy"), max_retries=llm_max_retries,
+                               enable_thinking=enable_thinking)
+
+        def _s6_bg():
+            try:
+                s6_box["result"] = run_summary(
+                    units, registry, visuals, llm_for_s6,
+                    out_dir, cache_dir, log_path, limiter=limiter, cfg=scfg)
+            except Exception as e:  # noqa: BLE001 —— S6 绝不影响主产物
+                s6_box["result"] = {"status": "fail", "error": str(e)[:200]}
+        import threading as _th
+        s6_thread = _th.Thread(target=_s6_bg, name="s6-turbo", daemon=True)
+        s6_thread.start()
+
     if offline:
         mark("s4", mode="offline")
     else:
@@ -276,6 +306,14 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
         # figures 产物统一在主线程 emit（S3 后台线程只写内存对象，避免并发写盘）
         emit_figures(visuals, out_dir / "figures", cache_dir)
 
+    # ---------- S6 收敛（turbo+summary）：与 S3/S4 重叠的后台概览 join ----------
+    if s6_thread is not None:
+        s6_thread.join()
+        r6 = s6_box.get("result", {"status": "fail", "error": "线程无结果"})
+        mark("s6", status=r6.get("status"), calls=r6.get("calls"),
+             tokens=r6.get("tokens"), wall_s=r6.get("wall_s"),
+             error=r6.get("error", ""))
+
     # ---------- S5 组装 ----------
     fig_by_id = {f["id"]: f for f in figures_dicts}
     title_unit = next((u for u in units if u.kind == "title"), None)
@@ -294,6 +332,8 @@ def run_pipeline(pdf: Path, out_dir: Path | None, cfg: dict,
         "图表": str(out_dir / "figures"),
         "溯源": str(out_dir / "segments.json"),
     }
+    if s6_thread is not None and (out_dir / (scfg.get("out_name", "概览.md"))).exists():
+        report["outputs"]["概览"] = str(out_dir / (scfg.get("out_name", "概览.md")))
     report["total_seconds"] = round(time.perf_counter() - t_start, 1)
     log_event(log_path, {"stage": "run", "level": "info", "msg": "done",
                          "pdf": pdf.name, "total_seconds": report["total_seconds"],

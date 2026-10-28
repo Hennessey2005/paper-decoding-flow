@@ -33,7 +33,7 @@ PDF ─► S1 MinerU解析 ─► S2 公式剥离 ─► S3 图表理解 ─► 
 git clone https://github.com/Hennessey2005/paper-decoding-flow.git
 ```
 
-打开仓库目录，**把 PDF 拖到 `run.bat` 图标上**（支持一次拖多个；也可双击后把文件拖入窗口回车）。首次运行自动完成：缺 Python 则引导安装 → 建 venv 装依赖 → 记事本打开 `config\config.yaml` 引导填 key（硅基 key 对应 `default`；**强烈建议顺手填入智谱 key**，零成本解锁 `free` 模式），之后秒进。处理完成后自动打开结果目录。
+打开仓库目录，**把 PDF 拖到 `run.bat` 图标上**（支持一次拖多个；也可双击后把文件拖入窗口回车）。首次运行自动完成：缺 Python 则引导安装 → 建 venv 装依赖 → 记事本打开 `config\config.yaml` 引导填 key（硅基 key 对应 `default`；**强烈建议顺手填入智谱 key**，零成本解锁 `free` 模式），之后秒进。选 `5) turbo` 并发模式时会追问是否同时生成「概览.md」速查总览（回车默认不生成）。处理完成后自动打开结果目录。
 
 ### 手动 / 其他平台
 
@@ -49,6 +49,7 @@ paper-translate paper.pdf
 
 ```bash
 paper-translate paper.pdf --mode default|turbo|free|local|minimum  # 运行模式，见下表
+paper-translate paper.pdf --mode turbo --summary   # 并发 + 额外产出「概览.md」速查总览
 paper-translate paper.pdf --cache-dir output/_cache/<hash>   # 复用解析缓存
 paper-translate paper.pdf --open                             # 完成后打开输出目录
 python -m paper_translate paper.pdf                          # 未安装命令时
@@ -122,7 +123,7 @@ python -m paper_translate paper.pdf                          # 未安装命令�
 | 模式 | 名称 | 是否自动配置 | 配置需求 | 成本 | 产物 |
 |---|---|---|---|---|---|
 | `default`（推荐） | 硅基流动云端：Qwen3-VL 图表理解 + DeepSeek 翻译（串行） | ✅ 首次引导填 key 即可用 | `api.api_key`（[硅基流动](https://siliconflow.cn)） | 按量计费，会议 < ¥1/篇，效果最好 | 全套：`译文.zh.md` / `译文.bilingual.md` / `formulas/` / `figures/`（含 VLM 中文描述与数据表）/ `segments.json` |
-| `turbo`（实验） | 同上云端，**并发版**：S3(并发6)∥S4(并发8) 重叠执行，共享 180RPM/1.8M TPM 滑动窗口限流（限额 200/2M 留余量） | ✅ 同 `default` | 同 `default`；`api.rate_limit` 可覆盖软限 | 同 `default`（速度约 ×3-4，长尾大表不再阻塞队列） | 同 `default`；单项失败不中断整体，重跑自动补译 |
+| `turbo`（实验） | 同上云端，**并发版**：S3(并发6)∥S4(并发8) 重叠执行，共享 180RPM/1.8M TPM 滑动窗口限流（限额 200/2M 留余量）；`--summary` 可选生成全文「概览.md」 | ✅ 同 `default` | 同 `default`；`api.rate_limit` / `summary` 段可配置 | 同 `default`（速度约 ×3-4；概览仅 +1 次长调用，全程与翻译重叠） | 同 `default` + `概览.md`（开启时）；单项失败不中断整体，重跑自动补译 |
 | `free` | 智谱免费云端：GLM-4.6V-Flash + GLM-4.7-Flash | ✅ 首次引导填 key 即可用 | `api.zhipu_api_key`（[open.bigmodel.cn](https://open.bigmodel.cn) 注册即得） | 0 元（免费档；偶发限流） | 与 `default` 相同的全套产物 |
 | `local` | Ollama 本地模型：翻译 + 图表理解（可选），全离线 | ❌ 手动配置（agent轻松代劳） | 安装 [Ollama](https://ollama.com) + 导入翻译模型（推荐 `gemma3-4b-it` Q4_K_M）；可选导入多模态模型解锁图表理解 | 0 元（仅电费） | 全套（同 `default`；本地 VLM 描述数值类建议对照原图核验） |
 | `minimum` | 纯解析（完全不调 API） | ✅ 零配置，开箱即用 | 无 | 0 元 | 解析产物：`译文.zh.md`（保留原文，未翻译）/ `formulas/` / `figures/`（裁剪图）/ `segments.json` |
@@ -130,6 +131,8 @@ python -m paper_translate paper.pdf                          # 未安装命令�
 </details>
 
 > **turbo 说明**：并发参数来自 `scripts/concurrency_bench.py` 实测（2026-10-28，硅基流动：S4 并发 8 提速 ~6×、S3 并发 6 消化 200s+ 级大表长尾，全档 0 次 429）。实测 **10 页论文 API 阶段 90–180 秒**（串行同规模约 2–5 分钟）；长尾大表在后台解析时翻译队列照常推进，互不等待。与 `default` 共享同一套缓存（translations.json / 图表结果），先用哪个模式跑都不重复计费；如遇异常切回 `default` 即从断点续跑。单项失败不中断整体，重跑自动补译。
+
+> **概览（S6，turbo 可选）**：加 `--summary`（或 config `summary.enabled: true`）产出一份 `概览.md`——模型通读论文全文（≤128k token 单次直读；超长论文自动分块压缩）后写成的中文速查总览，机构/链接/关键数字等前置信息一并保留。全程与翻译重叠执行，实测仅 +1 次调用、不增加墙钟；独立缓存重跑零计费，失败不影响其余产物。分块门控与提示词可在 config `summary` 段按学科自定义。
 
 所有模式共享 S1 本地解析（MinerU，按 PDF 内容哈希缓存，重跑零成本）。
 
@@ -139,6 +142,7 @@ python -m paper_translate paper.pdf                          # 未安装命令�
 output/<论文标题>/
 ├── 译文.zh.md          # 中文译文（公式 LaTeX 内嵌、图表原位描述）
 ├── 译文.bilingual.md   # 中英对照
+├── 概览.md             # 全文速查总览（仅 turbo + 概览开启时产出）
 ├── formulas/           # 公式注册表（编号/页码/LaTeX/回验状态）
 ├── figures/            # 图表理解（图注译文/VLM 描述/数据表）
 ├── segments.json       # 溯源层：译文段 ↔ PDF 页码/坐标

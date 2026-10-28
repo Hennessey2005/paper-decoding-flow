@@ -29,6 +29,18 @@ api:
     rpm: 180               # 每分钟请求数上限（两阶段重叠共享）
     tpm: 1800000           # 每分钟 token 上限（预留-校准制）
 
+# ---- S6 概览（仅 turbo 模式；CLI --summary/--no-summary 可临时开关）----
+summary:
+  enabled: false           # 总开关
+  gate_tokens: 128000      # 正文≤此值：单次全文直读（DIRECT）；超过：分块要点（MAPRED）
+  target_tokens: 40000     # MAPRED 每块目标大小
+  map_concurrency: 4       # 要点抽取并发（与 S4 重叠，共享限流）
+  max_output_tokens: 3000  # 概览输出上限
+  out_name: 概览.md
+  # system_prompt: |       # 自定义终稿提示词（按学科调整侧重；留空用内置五段模板）
+  #   你是{学科}文献综述助手……
+  # map_prompt: |          # 自定义分块要点提示词（仅超长论文回退路径用到）
+
 # ---- 免费方案（智谱，全免费，选填）----
 # 在 api.zhipu_api_key 填入智谱 key 后，run.bat 启动时可选 free 模式启用：
 #   VLM = GLM-4.6V-Flash（图表理解），LLM = GLM-4.7-Flash（翻译）
